@@ -2,27 +2,42 @@
 
 ## System Overview
 
-```
+```bash
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                              USER REQUEST                                   │
 └─────────────────────────────────────────────────────────────────────────────┘
                                       │
                                       ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                           BRAIN (Claude API)                                │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐        │
-│  │   Planner   │  │    GRPO     │  │   Reward    │  │   Prompts   │        │
-│  │             │  │  Evaluator  │  │   Assigner  │  │             │        │
-│  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘        │
+│                    PII SCRUBBER (Input) ──► CENTRAL VAULT                   │
+│  Tokenize sensitive data before Brain: john@acme.com → {{EMAIL_a1b2}}       │
 └─────────────────────────────────────────────────────────────────────────────┘
                                       │
-                    ┌─────────────────┼─────────────────┐
+                                      ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     FAST-PATH CLASSIFIER (Rule-Based)                       │
+│  Trivial tasks bypass Brain entirely → direct to single expert              │
+└─────────────────────────────────────────────────────────────────────────────┘
+                    │                               │
+            TRIVIAL │                               │ NEEDS_PLANNING
+                    ▼                               ▼
+┌───────────────────────────┐   ┌─────────────────────────────────────────────┐
+│  FAST-PATH EXECUTOR       │   │                BRAIN (Claude API)           │
+│  • Single expert          │   │  ┌─────────┐ ┌──────────┐ ┌─────────┐       │
+│  • Skip GRPO (N=1)        │   │  │ Planner │ │   GRPO   │ │ Prompts │       │
+│  • Auto checks → done     │   │  └─────────┘ └──────────┘ └─────────┘       │
+└───────────────────────────┘   └─────────────────────────────────────────────┘
+           │                                        │
+           │ (on failure)                           │
+           └─────────────────►──────────────────────┤
+                                                    ▼
+                    ┌─────────────────┬─────────────────┐
                     ▼                 ▼                 ▼
 ┌───────────────────────┐ ┌───────────────────┐ ┌───────────────────────────┐
 │    AGENT REGISTRY     │ │  CONTEXT MANAGER  │ │   ROUTER / SCHEDULER      │
 │  • Discovery          │ │  • TaskWorkspace  │ │  • Dispatch               │
 │  • Validation         │ │  • Shared State   │ │  • Parallel Execution     │
-│  • Model Updater      │ │  • Dependencies   │ │  • Sanitization           │
+│                       │ │  • Dependencies   │ │  • PII Scrub + Sanitize   │
 └───────────────────────┘ └───────────────────┘ └───────────────────────────┘
                     │                 │                 │
                     └─────────────────┼─────────────────┘
@@ -39,12 +54,18 @@
                                       │
                                       ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
+│                   PII SCRUBBER (Output) ──► CENTRAL VAULT                   │
+│  Tokenize expert output before Brain, local experts restore from vault      │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
 │                           STORAGE LAYER                                     │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐             │
-│  │  Conversation   │  │   Agent State   │  │   ChromaDB      │             │
-│  │     Store       │  │     Store       │  │  Vector Store   │             │
-│  │  (NO compact)   │  │  (checkpoints)  │  │ (semantic RAG)  │             │
-│  └─────────────────┘  └─────────────────┘  └─────────────────┘             │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐              │
+│  │  Conversation   │  │   Agent State   │  │   ChromaDB      │              │
+│  │     Store       │  │     Store       │  │  Vector Store   │              │
+│  │  (NO compact)   │  │  (checkpoints)  │  │ (semantic RAG)  │              │
+│  └─────────────────┘  └─────────────────┘  └─────────────────┘              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -52,19 +73,20 @@
 
 ## Domain Expert Workers
 
-Consolidated expert set to reduce resource requirements:
+Consolidated expert set matching the system diagram:
 
 | Domain Expert | Primary Model | Fallback | Specialty |
-|---------------|---------------|----------|-----------|
-| **CodeExpert** | `qwen2.5-coder:14b` | `deepseek-coder-v2:16b` | Code, tests, security, refactoring |
+| --------------- | --------------- | ---------- | ----------- |
+| **CodeExpert** | `qwen2.5-coder:14b` | `deepseek-coder-v2:16b` | Code generation, refactoring, bug fixes |
 | **VisionExpert** | `qwen2.5vl:7b` | `llava:13b` | Image analysis, OCR, UI screenshots |
-| **DocExpert** | `qwen2.5:14b` | `phi4:14b` | Documentation, API specs |
-| **DevOpsExpert** | `granite-code:20b` | `qwen2.5:14b` | CI/CD, Docker, K8s |
-| **FastValidator** | `qwen2.5:3b` | `phi4:14b` | Quick syntax, linting |
-| **EmbeddingExpert** | `nomic-embed-text` | `bge-m3` | Vector embeddings for ChromaDB |
+| **SecurityExpert** | `llama-guard3:8b` | `qwen2.5-coder:14b` | Security scanning, vulnerability detection |
+| **TestExpert** | `qwen2.5-coder:14b` | `deepseek-coder-v2:16b` | Test generation, coverage analysis |
+| **DataExpert** | `qwen2.5:14b` | `phi4:14b` | Data analysis, transformations |
+
+**Embedding Model:** `nomic-embed-text` (for ChromaDB vector store)
 
 **Hardware Requirements:**
-- Minimum: 16GB RAM, 8GB VRAM (run one model at a time)
+
 - Recommended: 32GB RAM, 16GB+ VRAM (keep models loaded)
 
 ---
@@ -73,7 +95,7 @@ Consolidated expert set to reduce resource requirements:
 
 Self-improving evaluation without a separate critic model:
 
-```
+```bash
 ┌─────────────────────────────────────────────────────────────────┐
 │                    GRPO EVALUATION LOOP                         │
 ├─────────────────────────────────────────────────────────────────┤
@@ -88,7 +110,7 @@ Self-improving evaluation without a separate critic model:
 │  STEP 2: REWARD ASSIGNMENT                                      │
 │  ┌─────────────────────────────────────────────────────────┐    │
 │  │  Automated: tests pass, lint, type check, security      │    │
-│  │  Brain-eval: correctness, efficiency, maintainability   │    │
+│  │  Brain-eval: task completion, scope adherence           │    │
 │  │  Rewards: [R1=0.8, R2=0.6, R3=0.9, R4=0.5, R5=0.7]      │    │
 │  └─────────────────────────────────────────────────────────┘    │
 │                           ↓                                     │
@@ -112,7 +134,8 @@ Self-improving evaluation without a separate critic model:
 ```
 
 **Reward Components:**
-```
+
+```bash
 FINAL REWARD = 0.7 * automated + 0.3 * brain_evaluated
 
 Automated (0-1 each, run locally):
@@ -133,7 +156,8 @@ NOTE: Brain does NOT evaluate code quality (correctness, efficiency).
 ```
 
 **Adaptive N Configuration:**
-```
+
+```bash
 GRPO samples N solutions based on task complexity:
 
   simple:  N=1, skip_grpo=true   (lint fix, typo, rename)
@@ -142,7 +166,8 @@ GRPO samples N solutions based on task complexity:
 ```
 
 **GRPO Latency Expectations:**
-```
+
+```bash
 ┌──────────────────────────────────────────────────────────────────────┐
 │  LATENCY BY HARDWARE TIER                                            │
 ├──────────────┬─────────────┬─────────────┬───────────────────────────┤
@@ -163,7 +188,8 @@ Latency Mitigation Strategies:
 ```
 
 **Error Propagation:**
-```
+
+```bash
 ┌──────────────────┬─────────────────────────────────┐
 │ Failure          │ Action                          │
 ├──────────────────┼─────────────────────────────────┤
@@ -180,7 +206,7 @@ Latency Mitigation Strategies:
 
 Workers share context through a centralized manager:
 
-```
+```bash
 ┌─────────────────────────────────────────────────────────────┐
 │                    CONTEXT MANAGER                          │
 ├─────────────────────────────────────────────────────────────┤
@@ -196,20 +222,22 @@ Workers share context through a centralized manager:
 │  • share(task_id, from_worker, to_worker, data)             │
 │  • get_file_state(task_id) → current file versions          │
 │  • commit_changes(task_id) → persist to disk                │
+│  • complete_task(task_id) → finalize + trigger hooks        │
 └─────────────────────────────────────────────────────────────┘
 
 Context Flow:
   CodeExpert writes function → Context Manager stores
-                                       ↓
+                        ↓
   TestExpert reads CodeExpert output from Context Manager
-                                       ↓
+                        ↓
   TestExpert generates tests → Context Manager stores
-                                       ↓
+                        ↓
   Brain evaluates both via GRPO
 ```
 
 **Execution Model:**
-```
+
+```bash
 SEQUENTIAL: File-modifying tasks (write, edit, delete)
   - One expert at a time for file changes
   - Prevents merge conflicts
@@ -222,7 +250,8 @@ PARALLEL: Read/analysis tasks (review, analyze, search)
 ```
 
 **DAG-Based Dependency Resolution:**
-```
+
+```bash
 ┌─────────────────────────────────────────────────────────────────┐
 │  DEPENDENCY GRAPH ENGINE                                        │
 ├─────────────────────────────────────────────────────────────────┤
@@ -263,26 +292,27 @@ Starvation Prevention:
   • Forced preemption after timeout
 ```
 
+**Post-Task Hooks:**
+
+Triggered by `complete_task(task_id)`:
+
+| Hook | Blocking | Purpose |
+| ------ | ---------- | --------- |
+| `audit_finalize` | Yes | Seal audit chain |
+| `doc_generation` | No (defer until GPU idle) | Queue doc updates |
+| `metrics_update` | No | Record performance |
+| `workspace_cleanup` | Yes | Free resources |
+
 ---
 
 ## Agent Registry
 
 Dynamic discovery and management of domain experts:
 
-```
+```bash
 ┌─────────────────────────────────────────────────────────────────┐
 │                       AGENT REGISTRY                            │
 ├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  DISCOVERY MODULE                                               │
-│  • Scans Ollama for available models                            │
-│  • Auto-registers new domain experts                            │
-│  • Maintains discovery history & retry logic                    │
-│                                                                 │
-│  VALIDATION MODULE                                              │
-│  • Probes agent capabilities (test requests)                    │
-│  • Verifies model responds correctly                            │
-│  • Generates capability metadata                                │
 │                                                                 │
 │  REGISTRY STORAGE                                               │
 │  • Persistent SQLite storage                                    │
@@ -292,9 +322,6 @@ Dynamic discovery and management of domain experts:
 ├─────────────────────────────────────────────────────────────────┤
 │  API:                                                           │
 │  • register(expert) → registers new domain expert               │
-│  • discover() → scans for available models                      │
-│  • lookup(domain) → finds best expert for domain                │
-│  • health_check(expert_id) → verifies expert responsive         │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -302,7 +329,7 @@ Dynamic discovery and management of domain experts:
 
 ## Persistent Storage Layer
 
-```
+```bash
 ┌─────────────────────────────────────────────────────────────────┐
 │                     STORAGE LAYER                               │
 ├─────────────────────────────────────────────────────────────────┤
@@ -328,6 +355,12 @@ Dynamic discovery and management of domain experts:
 │  • Used ONLY when context window exhausted                      │
 │  • Preserves key decisions, file states, outcomes               │
 │                                                                 │
+│  CENTRAL PII VAULT (SQLite, AES-256 encrypted)                  │
+│  • Token mapping: {{EMAIL_a1b2}} → encrypted(john@acme.com)     │
+│  • Shared across input + output scrubbing (single source)       │
+│  • Local experts restore originals via vault.resolve(token)     │
+│  • Scoped per-session, cleared on session end                   │
+│                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 
 Context Strategy:
@@ -337,142 +370,267 @@ Context Strategy:
              Full history remains in storage (recoverable)
 ```
 
-**Mental Model Builder Algorithm:**
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  MENTAL MODEL RECONSTRUCTION                                     │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  STEP 1: Extract Structured Data (always preserved)             │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │  • File states: {path: version, last_modified, status}  │    │
-│  │  • Decisions: [{decision, rationale, timestamp}]        │    │
-│  │  • Errors: [{error, resolution, expert}]                │    │
-│  │  • Task outcomes: [{task_id, status, result_summary}]   │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                                                                 │
-│  STEP 2: Semantic Relevance Scoring                             │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │  For each conversation message:                         │    │
-│  │    1. Embed message using EmbeddingExpert               │    │
-│  │    2. Compare to current task embedding                 │    │
-│  │    3. Score = cosine_similarity(msg, current_task)      │    │
-│  │    4. Keep if score > 0.7 OR message contains decision  │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                                                                 │
-│  STEP 3: Compression (for kept messages)                        │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │  • Code blocks → "Modified {file}: {summary}"           │    │
-│  │  • Long outputs → truncate to first/last 10 lines       │    │
-│  │  • Repeated patterns → "...repeated N times..."         │    │
-│  │  • Preserve: errors, decisions, user instructions       │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                                                                 │
-│  STEP 4: Assemble Mental Model                                  │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │  mental_model = {                                       │    │
-│  │    "session_summary": <1 paragraph overview>,           │    │
-│  │    "current_file_states": [...],                        │    │
-│  │    "key_decisions": [...],                              │    │
-│  │    "unresolved_issues": [...],                          │    │
-│  │    "relevant_history": <compressed messages>,           │    │
-│  │    "recent_messages": <last 20 raw messages>            │    │
-│  │  }                                                      │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
+**Mental Model Builder:**
 
-What Gets Dropped:
-  • Intermediate outputs (superseded by final results)
-  • Verbose logs and stack traces (keep summary only)
-  • Duplicate/similar messages (keep representative)
-  • Low-relevance context (score < 0.7, no decision markers)
+Used only when context window exhausted. Reconstructs from storage:
 
-What Is NEVER Dropped:
-  • User instructions and preferences
-  • Explicit decisions with rationale
-  • Error resolutions (how problems were fixed)
-  • File state changes
-  • Task completion status
+```bash
+1. Extract structured data (file states, decisions, errors, outcomes)
+2. Score relevance (embed + cosine similarity > 0.7)
+3. Compress (code → summary, truncate long outputs)
+4. Assemble: session_summary + file_states + decisions + recent_messages
 ```
+
+| Dropped | Never Dropped |
+| --------- | --------------- |
+| Intermediate outputs | User instructions |
+| Verbose logs | Decisions with rationale |
+| Duplicates | Error resolutions |
+| Low-relevance (< 0.7) | File state changes |
 
 ---
 
 ## Documentation Manager
 
-Qwen-powered automatic documentation maintenance:
+Deferred documentation generation using the Audit Log as change manifest.
+No file watcher needed - audit log already tracks every change.
 
+```bash
+DURING WORK                      END OF TASK (via post-task hook)
+═══════════                      ═══════════════════════════════
+
+Experts work ──► Audit Log       Audit Log ──► Manifest ──► Doc Generator
+(full GPU)      (records all)    (GPU free)    (what changed) (batch update)
 ```
+
+**Components:**
+
+```yaml
 ┌─────────────────────────────────────────────────────────────────┐
-│                  DOCUMENTATION MANAGER                          │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  DOC WATCHER (watchdog)                                         │
-│  • Monitors code changes (file system events)                   │
-│  • Detects when docs may be stale                               │
-│  • Tracks doc-to-code relationships                             │
-│                                                                 │
-│  DOC ANALYZER                                                   │
-│  • Parses existing documentation                                │
-│  • Identifies outdated sections                                 │
-│  • Finds missing documentation                                  │
-│                                                                 │
-│  DOC GENERATOR (Qwen-powered)                                   │
-│  • Generates new documentation from code                        │
-│  • Updates existing docs to match changes                       │
-│  • Maintains consistent style/format                            │
-│                                                                 │
-│  DOC CLEANER                                                    │
-│  • Removes obsolete documentation                               │
-│  • Fixes formatting issues                                      │
-│  • Validates links and references                               │
-│                                                                 │
-├─────────────────────────────────────────────────────────────────┤
-│  Modes: REACTIVE (on change), SCHEDULED, ON-DEMAND              │
+│  MANIFEST BUILDER     Query audit log, group by affected docs   │
+│  DOC ANALYZER         Map code → doc relationships              │
+│  DOC GENERATOR        Qwen-powered, full GPU, batch processing  │
+│  DOC CLEANER          Remove stale docs, fix broken links       │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+**Triggers:**
+
+| Trigger | When |
+| --------- | ------ |
+| END_OF_TASK | Post-task hook (deferred until GPU idle) |
+| END_OF_SESSION | User exits / timeout |
+| ON_DEMAND | User command |
+| SCHEDULED | Cron (nightly) |
+
 ---
 
-## Message Flow
+## Fast-Path Routing
 
+Rule-based classification that bypasses full planning for trivial tasks:
+
+```yaml
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              USER REQUEST                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      FAST-PATH CLASSIFIER (Rule-Based):                     │
+│                                                                             │
+│  Pattern matching against known trivial task types:                         │
+│  • fix typo, rename X to Y, add comment, format file                        │
+│  • update version, change string literal, toggle flag                       │
+│                                                                             │
+│  Decision: TRIVIAL | NEEDS_PLANNING                                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+                    │                               │
+            TRIVIAL │                               │ NEEDS_PLANNING
+                    ▼                               ▼
+┌───────────────────────────────┐   ┌─────────────────────────────────────────┐
+│        FAST PATH:             │   │           STANDARD PATH:                │
+│                               │   │                                         │
+│  • Skip Brain planning        │   │  • Full Brain planning                  │
+│  • Direct to single expert    │   │  • Multi-expert coordination            │
+│  • Skip GRPO (N=1)            │   │  • GRPO evaluation (N=2-3)              │
+│  • Minimal latency            │   │  • Full workflow                        │
+└───────────────────────────────┘   └─────────────────────────────────────────┘
 ```
-USER → BRAIN (Claude)
-         │
-         ├─ Plans task decomposition
-         ├─ Selects domain expert(s)
-         └─ Defines GRPO criteria
+
+**Classification Rules:**
+
+```yaml
+TRIVIAL PATTERNS → Fast Path:
+  • fix typo/spelling      → CodeExpert
+  • rename X to Y          → CodeExpert
+  • add comment            → CodeExpert
+  • format file/code       → CodeExpert
+  • update version         → CodeExpert
+  • change string literal  → CodeExpert
+  • remove unused import   → CodeExpert
+  • fix lint error         → FastValidator
+
+COMPLEXITY ESCALATORS → Standard Path:
+  • refactor, implement, add feature
+  • fix bug (needs investigation)
+  • security (needs SecurityExpert)
+  • test (needs TestExpert)
+  • multiple files, across the codebase
+
+DEFAULT: If no pattern matches → Standard Path (safe)
+```
+
+**Fast-Path Execution Flow:**
+
+```bash
+TRIVIAL TASK DETECTED
          │
          ▼
-    CONTEXT MANAGER ←──────────────────────────┐
-         │                                     │
-         ▼                                     │
-    ROUTER/SCHEDULER                           │
-         │                                     │
-    ┌────┴────┬────────┬────────┐              │
-    ▼         ▼        ▼        ▼              │
- CODE      VISION   SECURITY   TEST            │
- EXPERT    EXPERT   EXPERT     EXPERT          │
-    │         │        │        │              │
-    └────┬────┴────────┴────────┘              │
-         │                                     │
-         ▼                                     │
-    SANITIZER ─────────────────────────────────┘
-         │
-         ▼
-    BRAIN: GRPO EVALUATION
-         │
-    ┌────┴────┐
-    ▼         ▼
-  ACCEPT    RETRY
- (next)   (feedback)
+┌─────────────────────────────────────────────────────────────────┐
+│  FAST-PATH EXECUTOR                                              │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  1. Select expert from classifier result                        │
+│  2. Build minimal context (file content only)                   │
+│  3. Execute single expert, single solution (N=1)                │
+│  4. Run automated checks (lint, type check)                     │
+│  5. If checks pass → commit changes                             │
+│  6. If checks fail → escalate to standard path                  │
+│                                                                 │
+│  NO Brain API call for planning                                 │
+│  NO GRPO multi-sampling                                         │
+│  NO multi-expert coordination                                   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
 ```
+
+**Escalation from Fast-Path:**
+
+```yaml
+┌──────────────────────┬─────────────────────────────────────────────┐
+│ Condition            │ Action                                      │
+├──────────────────────┼─────────────────────────────────────────────┤
+│ Automated checks fail│ Escalate to standard path with context      │
+│ Expert returns error │ Escalate to standard path for re-planning   │
+│ Multiple files found │ Escalate (was misclassified)                │
+│ User explicitly asks │ Always use standard path if user requests   │
+│ Confidence < 0.8     │ Escalate to be safe                         │
+└──────────────────────┴─────────────────────────────────────────────┘
+```
+
+**Benefits:**
+
+- **Latency**: ~2-5s for trivial tasks vs 30s+ for full planning
+- **Cost**: Zero Claude API calls for trivial tasks
+- **Safety**: Automated checks catch failures, escalation preserves correctness
+
+---
+
+## Sanitizer
+
+Transforms expert outputs for Brain while preserving GRPO scoring data.
+PII Scrubber runs first (regex + NER detection), then Sanitizer extracts summaries:
+
+```yaml
+              ┌──────────────────────────────────────┐
+              │         CENTRAL PII VAULT            │
+              │  {{TOKEN}} ↔ encrypted(original)     │
+              └──────────────────────────────────────┘
+                     ▲                    ▲
+                     │                    │
+    ┌────────────────┴───┐          ┌─────┴────────────────┐
+    │  INPUT SCRUBBING   │          │  OUTPUT SCRUBBING    │
+    │  User → tokenize   │          │  Expert → tokenize   │
+    │  → Brain           │          │  → Sanitizer → Brain │
+    └────────────────────┘          └──────────────────────┘
+                                          │
+                                          ▼
+                               Local experts resolve
+                               tokens via vault lookup
+```
+
+**PII Scrubber** runs on both inputs and outputs with a central vault:
+
+- **Input path**: User request → scrub → Brain sees tokens
+- **Output path**: Expert output → scrub → Sanitizer → Brain sees tokens
+- **Restore path**: Brain response → local experts resolve tokens from vault
+- Regex: API keys, credentials, emails, SSN, phones, IPs, private keys
+- NER: Person names, organizations, addresses (local spaCy model)
+- Tokenization: `john@acme.com` → `{{EMAIL_a1b2}}`, `sk-abc123` → `{{KEY_c3d4}}`
+
+```yaml
+┌────────────────────────────────────────┐
+│  SANITIZER OUTPUT STRUCTURE            │
+├────────────────────────────────────────┤
+│  sanitized_result (sent to Brain):     │
+│    summary: "Added JWT auth to login"  │
+│    diff_stats: +45 lines, -12 lines    │
+│    files_changed: [auth.py, config.py] │
+│    pii_scrubbed: true                  │
+│                                        │
+│  grpo_metadata (local only):           │
+│    raw_output: <full code>             │
+│    test_results: pass/fail + coverage  │
+│    lint_score: 9.2/10                  │
+│    type_check: clean                   │
+│    security_scan: 0 issues             │
+│    pii_vault_ref: task_123             │
+└────────────────────────────────────────┘
+
+Brain evaluates WHAT was done (summary)
+Automated metrics score HOW WELL (metadata)
+Local experts can restore PII from vault when needed
+```
+
+### Local Audit Log
+
+Cryptographic audit trail for sanitization and reward integrity (stored in `audit.db`, never sent to cloud):
+
+```yaml
+┌─────────────────────────────────────────────────────────────────┐
+│  AUDIT RECORD                                                   │
+├─────────────────────────────────────────────────────────────────┤
+│  Identity:     record_id, task_id, expert_id, timestamp         │
+│  Hashes:       raw_input, sanitized_output, grpo_metadata       │
+│  PII:          detections_count, vault_ref, scrub_method        │
+│  Transform:    version, rules_applied                           │
+│  Reward:       inputs_hash, score, breakdown                    │
+│  Chain:        previous_hash, hmac_signature                    │
+└─────────────────────────────────────────────────────────────────┘
+
+Flow: Expert Output → PII Scrubber (detect, tokenize, vault) → Sanitizer → Brain
+      Brain sees tokens and "Added auth for {{EMAIL_a1b2}}"
+      Local experts call vault.resolve() to restore originals
+      Reward Calculator → Append to audit → Re-sign
+```
+
+**Capabilities:**
+
+| Query | Purpose |
+| ------- | --------- |
+| Verify record | Check signature and hash integrity |
+| Verify chain | Detect tampering in history |
+| Detect leakage | Scan outgoing messages for raw data |
+| Trace task | Follow data flow for a specific task |
+
+**Retention:** 90 days, daily integrity check, alert on chain break
+
+---
+
+## Security Boundaries
+
+1. **PII Scrubbing**: Regex + NER tokenizes inputs and outputs before Brain
+2. **Central Vault**: Single source for all PII tokens, local experts restore via lookup
+3. **Data Sanitization**: Brain never sees raw code, only summaries/diffs
+4. **Path Validation**: File operations restricted to project scope
+5. **Size Limits**: Large files truncated before processing
+6. **Sandboxed Execution**: Experts run in isolated environments
 
 ---
 
 ## Project Structure
 
-```
+```yaml
 air-gapped-intelligence/
 ├── plan.md
 ├── architecture.md
@@ -494,33 +652,39 @@ air-gapped-intelligence/
 │   │   │   ├── code.py
 │   │   │   ├── vision.py
 │   │   │   ├── security.py
-│   │   │   └── ...
+│   │   │   ├── test.py
+│   │   │   └── data.py
 │   │   └── executor.py
 │   ├── context/
 │   │   ├── manager.py
 │   │   ├── workspace.py
-│   │   └── state.py
+│   │   ├── state.py
+│   │   └── hooks.py            # Post-task hook system
 │   ├── storage/
 │   │   ├── conversation.py
 │   │   ├── agent_state.py
 │   │   ├── vector.py
-│   │   └── mental_model.py
+│   │   ├── mental_model.py
+│   │   ├── pii_vault.py        # Encrypted PII storage for local restoration
+│   │   └── audit.py            # Local audit log for sanitizer/rewards
 │   ├── registry/
 │   │   ├── registry.py
 │   │   ├── discovery.py
-│   │   ├── validation.py
-│   │   └── updater/
-│   │       ├── version_checker.py
-│   │       └── swapper.py
+│   │   └── validation.py
 │   ├── docs/
 │   │   ├── manager.py
-│   │   ├── watcher.py
+│   │   ├── manifest.py         # Builds change manifest from audit log
+│   │   ├── analyzer.py         # Maps code → doc relationships
 │   │   └── generator.py
 │   ├── router/
 │   │   ├── orchestrator.py
 │   │   ├── dispatcher.py
 │   │   ├── scheduler.py
-│   │   └── sanitizer.py
+│   │   ├── pii_scrubber.py       # Regex + NER PII detection/redaction
+│   │   ├── sanitizer.py
+│   │   └── fast_path/
+│   │       ├── classifier.py      # Rule-based task classification
+│   │       └── executor.py        # Fast-path execution logic
 │   └── tools/
 │       ├── base.py
 │       ├── file_ops.py
@@ -530,46 +694,10 @@ air-gapped-intelligence/
 
 ---
 
-## Sanitizer
-
-Transforms expert outputs for Brain while preserving GRPO scoring data:
-
-```
-┌────────────────────────────────────────┐
-│  SANITIZER OUTPUT STRUCTURE            │
-├────────────────────────────────────────┤
-│  sanitized_result (sent to Brain):     │
-│    summary: "Added JWT auth to login"  │
-│    diff_stats: +45 lines, -12 lines    │
-│    files_changed: [auth.py, config.py] │
-│                                        │
-│  grpo_metadata (local only):           │
-│    raw_output: <full code>             │
-│    test_results: pass/fail + coverage  │
-│    lint_score: 9.2/10                  │
-│    type_check: clean                   │
-│    security_scan: 0 issues             │
-└────────────────────────────────────────┘
-
-Brain evaluates WHAT was done (summary)
-Automated metrics score HOW WELL (metadata)
-```
-
----
-
-## Security Boundaries
-
-1. **Data Sanitization**: Brain never sees raw code, only summaries/diffs
-2. **Shell Allowlist**: Only approved commands can execute
-3. **Path Validation**: File operations restricted to project scope
-4. **Size Limits**: Large files truncated before processing
-5. **Sandboxed Execution**: Experts run in isolated environments
-
----
-
 ## Operational Configuration
 
 **Claude API Rate Limiting:**
+
 ```yaml
 rate_limit:
   requests_per_minute: 50      # Tier 1 default
@@ -579,6 +707,7 @@ rate_limit:
 ```
 
 **Ollama Connection Management:**
+
 ```yaml
 ollama_config:
   keep_alive: "10m"            # Model stays loaded after request
@@ -593,11 +722,14 @@ ollama_config:
 ## Key Design Decisions
 
 | Decision | Rationale |
-|----------|-----------|
+| ---------- | ----------- |
 | GRPO over fixed thresholds | Self-calibrating, no arbitrary cutoffs |
 | ChromaDB for vectors | Local, no cloud dependency, good performance |
 | No auto-compaction | Full history preserves context for rebuilds |
 | Domain experts over generic | Specialized prompts yield better results |
-| Watchdog for docs | Real-time change detection |
+| Deferred doc generation | No VRAM contention, uses audit log as manifest |
 | Sequential file writes | Prevents merge conflicts, simpler than locking |
 | Adaptive GRPO N | Reduce inference cost for simple tasks |
+| Fast-path routing | Zero API calls for trivial tasks |
+| Post-task hooks | Clean trigger for deferred operations |
+| Central PII Vault | Tokenize in/out; single source for local expert restoration |
