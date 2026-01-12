@@ -300,89 +300,6 @@ Dynamic discovery and management of domain experts:
 
 ---
 
-## Model Updater
-
-Automatic model updates when better versions available:
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    MODEL UPDATER                                │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  VERSION CHECKER                                                │
-│  • Polls Ollama library for new versions                        │
-│  • Compares local vs available                                  │
-│  • Identifies deprecated models                                 │
-│                                                                 │
-│  PERFORMANCE MONITOR                                            │
-│  • Tracks per-expert success rates                              │
-│  • Monitors inference latency                                   │
-│  • Triggers swap when thresholds breached                       │
-│                                                                 │
-│  MODEL SWAPPER                                                  │
-│  • Hot-swaps models without restart                             │
-│  • Pulls new models via Ollama API                              │
-│  • Rollback capability if new model fails                       │
-│                                                                 │
-├─────────────────────────────────────────────────────────────────┤
-│  Update Flow:                                                   │
-│  1. Scheduled check finds newer model                           │
-│  2. Pull: `ollama pull deepseek-coder-v3:16b`                   │
-│  3. Validation runs test prompts                                │
-│  4. If pass → hot-swap; If fail → keep current                  │
-└─────────────────────────────────────────────────────────────────┘
-
-Auto-Update Policy:
-  auto_update: true
-  schedule: "weekly"
-  require_validation: true
-  rollback_on_failure: true
-```
-
-**Shadow Mode for Safe Updates:**
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  SHADOW MODE UPDATE PROTOCOL                                     │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  Problem: New model might have different output format,         │
-│           quality regression, or incompatible behavior          │
-│                                                                 │
-│  Solution: Run new model in "shadow mode" before swap           │
-│                                                                 │
-│  ┌───────────────────────────────────────────────────────┐      │
-│  │  PHASE 1: Shadow Deployment                           │      │
-│  │  • Pull new model: ollama pull qwen2.5-coder:latest   │      │
-│  │  • Keep current model as primary                      │      │
-│  │  • New model runs in parallel (shadow)                │      │
-│  └───────────────────────────────────────────────────────┘      │
-│                           ↓                                     │
-│  ┌───────────────────────────────────────────────────────┐      │
-│  │  PHASE 2: Comparison (N=10 real tasks)                │      │
-│  │  • Both models process same inputs                    │      │
-│  │  • Only current model output is used                  │      │
-│  │  • Shadow output scored but discarded                 │      │
-│  │  • Track: latency, quality score, error rate          │      │
-│  └───────────────────────────────────────────────────────┘      │
-│                           ↓                                     │
-│  ┌───────────────────────────────────────────────────────┐      │
-│  │  PHASE 3: Promotion Decision                          │      │
-│  │  IF shadow_score >= current_score * 0.95:             │      │
-│  │    AND shadow_errors <= current_errors:               │      │
-│  │    AND shadow_latency <= current_latency * 1.2:       │      │
-│  │      → PROMOTE shadow to primary                      │      │
-│  │  ELSE:                                                │      │
-│  │      → REJECT, keep current, log reason               │      │
-│  └───────────────────────────────────────────────────────┘      │
-│                                                                 │
-│  Rollback: Keep previous model for 7 days after promotion       │
-│            Instant rollback if error rate spikes                │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
-
----
-
 ## Persistent Storage Layer
 
 ```
@@ -681,7 +598,6 @@ ollama_config:
 | ChromaDB for vectors | Local, no cloud dependency, good performance |
 | No auto-compaction | Full history preserves context for rebuilds |
 | Domain experts over generic | Specialized prompts yield better results |
-| Hot-swap models | Upgrade without service interruption |
 | Watchdog for docs | Real-time change detection |
 | Sequential file writes | Prevents merge conflicts, simpler than locking |
 | Adaptive GRPO N | Reduce inference cost for simple tasks |
